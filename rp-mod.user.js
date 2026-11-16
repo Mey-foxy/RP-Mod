@@ -4,7 +4,12 @@
 // @version      0.1.0
 // @description  Щит от несогласованных вмешательств в Bondage Club
 // @author       Mey-foxy
-// @match        *://*.bondageclub.com/*
+// @match        // @match        *://*.bondageclub.com/*
+// @match        *://*.bondageprojects.com/*
+// @match        *://*.bondages.electricseduction.com/*
+// @match        *://*.bondage-club.net/*
+// @match        *://*.bondageprojects.elementfx.com/*
+// @match        *://*.beta.bondageprojects.com/*
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/Mey-foxy/RP-Mod/main/rp-mod.user.js
 // @downloadURL  https://raw.githubusercontent.com/Mey-foxy/RP-Mod/main/rp-mod.user.js
