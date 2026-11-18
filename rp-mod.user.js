@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RP Mod — Щит
 // @namespace    rp-mod
-// @version      0.9.1
+// @version      0.10.0
 // @description  Щит от несогласованных вмешательств и заглушка травли в Bondage Club
 // @author       Mey-foxy
 // @match        https://www.bondageprojects.elementfx.com/R*/*
@@ -13,7 +13,7 @@
 
 (function() {
   'use strict';
-  console.log('[RP Mod] Лоадер запущен (v0.9.1)');
+  console.log('[RP Mod] Лоадер запущен (v0.10.0)');
 
   const SHIELD_KEY = 'rp_mod_shield_state';
   const MUTE_TYPES = ['Chat', 'Whisper', 'Emote'];
@@ -78,6 +78,15 @@
     return false;
   }
 
+  // Защита от спама алертами: одному игроку окно показываем не чаще раза в 15 секунд
+  const alertCooldown = {};
+  function canAlert(sender) {
+    const now = Date.now();
+    if (alertCooldown[sender] && now - alertCooldown[sender] < 15000) return false;
+    alertCooldown[sender] = now;
+    return true;
+  }
+
   function nameOf(num) {
     try {
       if (typeof ChatRoomCharacter !== 'undefined') {
@@ -111,21 +120,21 @@
     } catch (e) { return false; }
   }
 
+  // Status больше НЕ считается вмешательством — это служебные пакеты от всех игроков.
+  // Вмешательство = Action/Activity чужого игрока, нацеленные на тебя.
+  // Смена внешности, если она приедет в другом виде, словит страж снимка (см. ниже).
   function isIntervention(msg) {
     if (!msg || !myMemberNumber) return false;
     if (msg.Sender === myMemberNumber) return false;
-    const t = msg.Type;
-    if (t !== 'Action' && t !== 'Activity' && t !== 'Status') return false;
-    const emptyContent = (msg.Content == null) || msg.Content === 'null' || msg.Content === '';
-    if (!touchesMe(msg) && !(t === 'Status' && emptyContent)) return false;
+    if (msg.Type !== 'Action' && msg.Type !== 'Activity') return false;
+    if (!touchesMe(msg)) return false;
     if (msg.Content === 'ServerEnter') return false;
     return true;
   }
 
   function describe(msg) {
     const who = nameOf(msg.Sender);
-    let act = msg.Content;
-    if (act == null || act === 'null' || act === '') act = 'действие без описания (вероятно, смена внешности или позы)';
+    const act = msg.Content || 'неизвестное действие';
     const detail = [];
     try {
       for (let i = 0; i < msg.Dictionary.length; i++) {
@@ -143,7 +152,8 @@
     return msg.Sender + '|' + (msg.Content || '') + '|' + describe(msg);
   }
 
-  // --- Снимок внешности и страж изменений ---
+  // --- Снимок внешности: эталон согласованности ---
+  // Обновляется ТОЛЬКО с ведома игрока: свои действия, «Отмена» в алерте, команда snap()
   let snapshot = null;
   let snapTimer = null;
   let revertPending = false;
@@ -160,16 +170,15 @@
       }
       if (!inRoom) return;
       snapshot = JSON.stringify(Player.Appearance);
-      console.log('[RP Mod] Снимок внешности обновлён');
+      console.log('[RP Mod] Снимок внешности обновлён (' + Player.Appearance.length + ' предметов)');
     } catch (e) {}
   }
 
   function scheduleSnapshotUpdate() {
     if (snapTimer) clearTimeout(snapTimer);
-    snapTimer = setTimeout(captureSnapshot, 1500);
+    snapTimer = setTimeout(captureSnapshot, 2000);
   }
 
-  // Сравниваем только НАБОР предметов, не их мелкие свойства
   function appearanceItemSet(appearance) {
     try {
       const set = [];
@@ -181,7 +190,6 @@
     } catch (e) { return null; }
   }
 
-  // Мгновенный локальный откат: вернуть сохранённую внешность у себя, ничего не отправляя
   function applySnapshotLocally() {
     if (!snapshot) return false;
     try {
@@ -209,7 +217,7 @@
   function handleSyncChar(charData) {
     if (window.RPModDebug) {
       console.log('[RP Mod][DEBUG] handleSyncChar: MemberNumber=' + charData.MemberNumber +
-        ', внешний вид = ' + (Array.isArray(charData.Appearance) ? charData.Appearance.length + ' предметов' : 'нет') +
+        ', предметов=' + (Array.isArray(charData.Appearance) ? charData.Appearance.length : 'нет') +
         ', revertPending=' + revertPending + ', снимок=' + (snapshot ? 'есть' : 'нет'));
     }
     if (revertPending) {
@@ -221,22 +229,31 @@
       } else {
         console.warn('[RP Mod] Снимок внешности недоступен — откат невозможен');
       }
-      scheduleSnapshotUpdate();
       return;
     }
 
     const incoming = charData.Appearance;
-    if (!snapshot || !Array.isArray(incoming)) {
-      scheduleSnapshotUpdate();
+
+    // Первый пакет синхронизации в комнате — берём базовый снимок
+    if (!snapshot) {
+      if (Array.isArray(incoming)) {
+        snapshot = JSON.stringify(incoming);
+        console.log('[RP Mod] Базовый снимок внешности создан');
+      }
       return;
     }
 
+    if (!Array.isArray(incoming)) return;
+
+    // Ты сама что-то меняла или разрешила — принимаем как новый эталон
     if (allowPending) {
       allowPending = false;
-      scheduleSnapshotUpdate();
+      snapshot = JSON.stringify(incoming);
+      console.log('[RP Mod] Снимок обновлён после твоего (или разрешённого) изменения');
       return;
     }
 
+    // Страж: чужое изменение набора предметов — откатываем
     const oldSet = appearanceItemSet(JSON.parse(snapshot));
     const newSet = appearanceItemSet(incoming);
     if (oldSet !== newSet) {
@@ -244,11 +261,9 @@
       console.warn('[RP Mod] 🛡 Несанкционированное изменение набора предметов отменено');
       return;
     }
-
-    scheduleSnapshotUpdate();
+    // Набор совпадает — снимок не трогаем
   }
 
-  // В пакетах синхронизации персонаж может лежать и как data.Character, и как сам data
   function extractCharacter(payload) {
     if (!payload || typeof payload !== 'object') return null;
     if (payload.Character && typeof payload.Character === 'object' && payload.Character.MemberNumber) {
@@ -259,14 +274,11 @@
   }
 
   function handleIntervention(msg) {
-    const appearanceChange = APPEARANCE_CONTENTS.indexOf(msg.Content) !== -1 || msg.Content == null;
+    const appearanceChange = APPEARANCE_CONTENTS.indexOf(msg.Content) !== -1;
     if (isBlocked(msg.Sender)) {
       console.warn('[RP Mod] 🚫 БЛОК: ' + describe(msg));
       if (appearanceChange) {
-        // Мгновенный локальный откат + страховка на случай отложенной синхронизации
-        if (applySnapshotLocally()) {
-          console.warn('[RP Mod] 🛡 Внешность восстановлена локально сразу');
-        }
+        if (applySnapshotLocally()) console.warn('[RP Mod] 🛡 Внешность восстановлена локально сразу');
         revertPending = true;
         armFallbackRevert();
       }
@@ -274,22 +286,21 @@
     }
     const state = getShieldState();
     if (state.mode === 'alert') {
-      if (!isDuplicate(msgKey(msg))) {
+      if (!isDuplicate(msgKey(msg)) && canAlert(msg.Sender)) {
         const info = describe(msg);
         console.warn('[RP Mod] ⚠️ ВМЕШАТЕЛЬСТВО: ' + info);
         const ok = confirm('RP Mod — Щит\n\nИгрок ' + nameOf(msg.Sender) + ' (#' + msg.Sender + '):\n' + info + '\n\nЗаблокировать этого игрока?\n(Отмена = разрешить это действие)');
         if (ok) {
           addToBlockList(msg.Sender);
           if (appearanceChange) {
-            if (applySnapshotLocally()) {
-              console.warn('[RP Mod] 🛡 Внешность восстановлена локально сразу');
-            }
+            if (applySnapshotLocally()) console.warn('[RP Mod] 🛡 Внешность восстановлена локально сразу');
             revertPending = true;
             armFallbackRevert();
           }
           return true;
         }
         allowPending = true;
+        scheduleSnapshotUpdate();
         console.log('[RP Mod] Разрешено: ' + info);
       }
       return false;
@@ -426,9 +437,11 @@
     const originalSend = ServerSend;
     window.ServerSend = function(type, data) {
       try {
+        // Собственные изменения внешности/позы — пропускаем и принимаем как новый эталон
         if (type === 'ChatRoomCharacterUpdate' || type === 'ChatRoomPoseUpdate' ||
-            (typeof type === 'string' && type.indexOf('Appearance') !== -1)) {
+            (typeof type === 'string' && (type.indexOf('Appearance') !== -1 || type.indexOf('Clothes') !== -1))) {
           allowPending = true;
+          scheduleSnapshotUpdate();
         }
       } catch (e) {}
       return originalSend.apply(this, arguments);
