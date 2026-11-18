@@ -247,6 +247,9 @@
     }
 
     const name = packet.data[0];
+    if (window.RPModDebug) {
+      console.log('[RP Mod][DEBUG] пакет: ' + name, packet.data[1]);
+    }
 
     // Бипы — глотаем молча
     if (typeof name === 'string' && name.indexOf('Beep') !== -1) {
@@ -259,7 +262,7 @@
     }
 
     // Пакеты синхронизации внешности — сюда подменяем откат
-    if (name === 'ChatRoomSync') {
+    if (name === 'ChatRoomSyncSingle' || name === 'ChatRoomSyncCharacter') {
       const room = packet.data[1];
       if (room && Array.isArray(room.Character)) {
         for (let i = 0; i < room.Character.length; i++) {
@@ -393,6 +396,10 @@
       const s = getShieldState();
       const names = s.muteList.map(function(n) { return nameOf(n) + ' (#' + n + ')'; });
       console.log('[RP Mod] Заглушенные: ' + (names.length ? names.join(', ') : 'пусто'));
+    },
+    debug: function() {
+      window.RPModDebug = !window.RPModDebug;
+      console.log('[RP Mod] Отладка пакетов: ' + (window.RPModDebug ? 'ВКЛ — все пакеты пойдут в консоль' : 'выключена'));
     },
     snap: function() { captureSnapshot(); },
     clear: function() {
