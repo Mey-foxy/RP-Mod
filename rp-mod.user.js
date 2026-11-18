@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RP Mod — Щит
 // @namespace    rp-mod
-// @version      0.10.0
-// @description  Щит от несогласованных вмешательств и заглушка травли в Bondage Club
+// @version      0.12.0
+// @description  Щит от несогласованных вмешательств и заглушка травли в Bondage Club + панель управления
 // @author       Mey-foxy
 // @match        https://www.bondageprojects.elementfx.com/R*/*
 // @match        https://bondage-europe.com/R*/*
@@ -13,14 +13,14 @@
 
 (function() {
   'use strict';
-  console.log('[RP Mod] Лоадер запущен (v0.10.0)');
+  console.log('[RP Mod] Лоадер запущен (v0.12.0)');
 
   const SHIELD_KEY = 'rp_mod_shield_state';
   const MUTE_TYPES = ['Chat', 'Whisper', 'Emote'];
-  const APPEARANCE_CONTENTS = ['ChangeClothes', 'ActionUse', 'ActionRemove'];
+  const ITEM_ACTIONS = ['ActionUse', 'ActionRemove', 'ChangeClothes'];
 
   function defaultState() {
-    return { enabled: true, mode: 'alert', blockList: [], muteList: [] };
+    return { enabled: true, mode: 'alert', blockList: [], muteList: [], trustList: [], clothingGuard: false, restrictionsGuard: false };
   }
 
   function getShieldState() {
@@ -35,8 +35,11 @@
     if (!state || typeof state !== 'object') return defaultState();
     if (!Array.isArray(state.blockList)) state.blockList = [];
     if (!Array.isArray(state.muteList)) state.muteList = [];
+    if (!Array.isArray(state.trustList)) state.trustList = [];
     if (['spy', 'alert', 'silent'].indexOf(state.mode) === -1) state.mode = 'alert';
     if (typeof state.enabled !== 'boolean') state.enabled = true;
+    if (typeof state.clothingGuard !== 'boolean') state.clothingGuard = false;
+    if (typeof state.restrictionsGuard !== 'boolean') state.restrictionsGuard = false;
     return state;
   }
 
@@ -46,24 +49,42 @@
 
   function isBlocked(num) { return getShieldState().blockList.indexOf(num) !== -1; }
   function isMuted(num) { return getShieldState().muteList.indexOf(num) !== -1; }
+  function isTrusted(num) { return getShieldState().trustList.indexOf(num) !== -1; }
 
   function addToBlockList(num) {
     const s = getShieldState();
     if (s.blockList.indexOf(num) === -1) {
       s.blockList.push(num);
       saveShieldState(s);
-      console.log('[RP Mod] Игрок #' + num + ' добавлен в блок-лист');
     }
   }
 
   function removeFromBlockList(num) {
     const s = getShieldState();
     const i = s.blockList.indexOf(num);
-    if (i !== -1) {
-      s.blockList.splice(i, 1);
-      saveShieldState(s);
-      console.log('[RP Mod] Игрок #' + num + ' убран из блок-листа');
-    }
+    if (i !== -1) { s.blockList.splice(i, 1); saveShieldState(s); }
+  }
+
+  function addToMuteList(num) {
+    const s = getShieldState();
+    if (s.muteList.indexOf(num) === -1) { s.muteList.push(num); saveShieldState(s); }
+  }
+
+  function removeFromMuteList(num) {
+    const s = getShieldState();
+    const i = s.muteList.indexOf(num);
+    if (i !== -1) { s.muteList.splice(i, 1); saveShieldState(s); }
+  }
+
+  function addToTrustList(num) {
+    const s = getShieldState();
+    if (s.trustList.indexOf(num) === -1) { s.trustList.push(num); saveShieldState(s); }
+  }
+
+  function removeFromTrustList(num) {
+    const s = getShieldState();
+    const i = s.trustList.indexOf(num);
+    if (i !== -1) { s.trustList.splice(i, 1); saveShieldState(s); }
   }
 
   let myMemberNumber = null;
@@ -78,7 +99,6 @@
     return false;
   }
 
-  // Защита от спама алертами: одному игроку окно показываем не чаще раза в 15 секунд
   const alertCooldown = {};
   function canAlert(sender) {
     const now = Date.now();
@@ -111,6 +131,13 @@
     return null;
   }
 
+  function resolvePlayer(input) {
+    if (typeof input === 'number') return input;
+    const n = parseInt(String(input).trim(), 10);
+    if (!isNaN(n) && String(input).trim() === String(n)) return n;
+    return numberByName(input);
+  }
+
   function touchesMe(data) {
     try {
       const s = JSON.stringify(data);
@@ -120,9 +147,6 @@
     } catch (e) { return false; }
   }
 
-  // Status больше НЕ считается вмешательством — это служебные пакеты от всех игроков.
-  // Вмешательство = Action/Activity чужого игрока, нацеленные на тебя.
-  // Смена внешности, если она приедет в другом виде, словит страж снимка (см. ниже).
   function isIntervention(msg) {
     if (!msg || !myMemberNumber) return false;
     if (msg.Sender === myMemberNumber) return false;
@@ -152,116 +176,14 @@
     return msg.Sender + '|' + (msg.Content || '') + '|' + describe(msg);
   }
 
-  // --- Снимок внешности: эталон согласованности ---
-  // Обновляется ТОЛЬКО с ведома игрока: свои действия, «Отмена» в алерте, команда snap()
-  let snapshot = null;
-  let snapTimer = null;
-  let revertPending = false;
-  let allowPending = false;
-  let revertFallbackTimer = null;
-
-  function captureSnapshot() {
-    try {
-      if (typeof Player === 'undefined' || !Player || !Array.isArray(Player.Appearance)) return;
-      if (typeof ChatRoomCharacter === 'undefined' || !Array.isArray(ChatRoomCharacter) || ChatRoomCharacter.length === 0) return;
-      let inRoom = false;
-      for (let i = 0; i < ChatRoomCharacter.length; i++) {
-        if (ChatRoomCharacter[i].MemberNumber === Player.MemberNumber) { inRoom = true; break; }
-      }
-      if (!inRoom) return;
-      snapshot = JSON.stringify(Player.Appearance);
-      console.log('[RP Mod] Снимок внешности обновлён (' + Player.Appearance.length + ' предметов)');
-    } catch (e) {}
+  // --- Стражи ---
+  let clothingGuardUntil = 0; // временная защита после заблокированного действия
+  function clothingGuardActive() {
+    const s = getShieldState();
+    return s.clothingGuard || Date.now() < clothingGuardUntil;
   }
-
-  function scheduleSnapshotUpdate() {
-    if (snapTimer) clearTimeout(snapTimer);
-    snapTimer = setTimeout(captureSnapshot, 2000);
-  }
-
-  function appearanceItemSet(appearance) {
-    try {
-      const set = [];
-      for (let i = 0; i < appearance.length; i++) {
-        const item = appearance[i];
-        if (item) set.push(String(item.Asset || '?') + '|' + String(item.Group || '?'));
-      }
-      return set.sort().join('\n');
-    } catch (e) { return null; }
-  }
-
-  function applySnapshotLocally() {
-    if (!snapshot) return false;
-    try {
-      Player.Appearance = JSON.parse(snapshot);
-      if (typeof CharacterRefresh === 'function') CharacterRefresh(Player);
-      return true;
-    } catch (e) {
-      console.error('[RP Mod] Локальный откат не сработал: ' + e.message);
-      return false;
-    }
-  }
-
-  function armFallbackRevert() {
-    if (revertFallbackTimer) clearTimeout(revertFallbackTimer);
-    revertFallbackTimer = setTimeout(function() {
-      if (revertPending) {
-        if (applySnapshotLocally()) {
-          console.warn('[RP Mod] 🛡 Появление восстановлено локально (аварийный путь)');
-        }
-      }
-      revertPending = false;
-    }, 4000);
-  }
-
-  function handleSyncChar(charData) {
-    if (window.RPModDebug) {
-      console.log('[RP Mod][DEBUG] handleSyncChar: MemberNumber=' + charData.MemberNumber +
-        ', предметов=' + (Array.isArray(charData.Appearance) ? charData.Appearance.length : 'нет') +
-        ', revertPending=' + revertPending + ', снимок=' + (snapshot ? 'есть' : 'нет'));
-    }
-    if (revertPending) {
-      if (revertFallbackTimer) clearTimeout(revertFallbackTimer);
-      revertPending = false;
-      if (snapshot && Array.isArray(charData.Appearance)) {
-        charData.Appearance = JSON.parse(snapshot);
-        console.warn('[RP Mod] 🛡 Появление восстановлено — вмешательство отменено');
-      } else {
-        console.warn('[RP Mod] Снимок внешности недоступен — откат невозможен');
-      }
-      return;
-    }
-
-    const incoming = charData.Appearance;
-
-    // Первый пакет синхронизации в комнате — берём базовый снимок
-    if (!snapshot) {
-      if (Array.isArray(incoming)) {
-        snapshot = JSON.stringify(incoming);
-        console.log('[RP Mod] Базовый снимок внешности создан');
-      }
-      return;
-    }
-
-    if (!Array.isArray(incoming)) return;
-
-    // Ты сама что-то меняла или разрешила — принимаем как новый эталон
-    if (allowPending) {
-      allowPending = false;
-      snapshot = JSON.stringify(incoming);
-      console.log('[RP Mod] Снимок обновлён после твоего (или разрешённого) изменения');
-      return;
-    }
-
-    // Страж: чужое изменение набора предметов — откатываем
-    const oldSet = appearanceItemSet(JSON.parse(snapshot));
-    const newSet = appearanceItemSet(incoming);
-    if (oldSet !== newSet) {
-      charData.Appearance = JSON.parse(snapshot);
-      console.warn('[RP Mod] 🛡 Несанкционированное изменение набора предметов отменено');
-      return;
-    }
-    // Набор совпадает — снимок не трогаем
+  function armTemporaryClothingGuard() {
+    clothingGuardUntil = Date.now() + 15000;
   }
 
   function extractCharacter(payload) {
@@ -274,33 +196,37 @@
   }
 
   function handleIntervention(msg) {
-    const appearanceChange = APPEARANCE_CONTENTS.indexOf(msg.Content) !== -1;
+    const state = getShieldState();
+    // Доверенным можно всё
+    if (isTrusted(msg.Sender)) return false;
+
     if (isBlocked(msg.Sender)) {
       console.warn('[RP Mod] 🚫 БЛОК: ' + describe(msg));
-      if (appearanceChange) {
-        if (applySnapshotLocally()) console.warn('[RP Mod] 🛡 Внешность восстановлена локально сразу');
-        revertPending = true;
-        armFallbackRevert();
-      }
       return true;
     }
-    const state = getShieldState();
+
+    // Защита ограничений: чужие действия с предметами на мне
+    if (state.restrictionsGuard && ITEM_ACTIONS.indexOf(msg.Content) !== -1) {
+      console.warn('[RP Mod] 🛡 Ограничения: заблокировано от ' + nameOf(msg.Sender) + ': ' + msg.Content);
+      return true;
+    }
+    // Защита одежды: чужая смена одежды на мне
+    if (state.clothingGuard && msg.Content === 'ChangeClothes') {
+      console.warn('[RP Mod] 🛡 Одежда: заблокирована смена от ' + nameOf(msg.Sender));
+      return true;
+    }
+
     if (state.mode === 'alert') {
       if (!isDuplicate(msgKey(msg)) && canAlert(msg.Sender)) {
         const info = describe(msg);
         console.warn('[RP Mod] ⚠️ ВМЕШАТЕЛЬСТВО: ' + info);
-        const ok = confirm('RP Mod — Щит\n\nИгрок ' + nameOf(msg.Sender) + ' (#' + msg.Sender + '):\n' + info + '\n\nЗаблокировать этого игрока?\n(Отмена = разрешить это действие)');
+        const ok = confirm('RP Mod — Щит\n\nИгрок ' + nameOf(msg.Sender) + ' (#' + msg.Sender + '):\n' + info + '\n\nЗаблокировать этого игрока?');
         if (ok) {
           addToBlockList(msg.Sender);
-          if (appearanceChange) {
-            if (applySnapshotLocally()) console.warn('[RP Mod] 🛡 Внешность восстановлена локально сразу');
-            revertPending = true;
-            armFallbackRevert();
-          }
+          if (msg.Content === 'ChangeClothes') armTemporaryClothingGuard();
+          renderPanel();
           return true;
         }
-        allowPending = true;
-        scheduleSnapshotUpdate();
         console.log('[RP Mod] Разрешено: ' + info);
       }
       return false;
@@ -341,24 +267,14 @@
       return false;
     }
 
-    // Пакеты синхронизации внешности
-    if (name === 'ChatRoomSync') {
-      const room = packet.data[1];
-      if (room && Array.isArray(room.Character)) {
-        for (let i = 0; i < room.Character.length; i++) {
-          if (room.Character[i].MemberNumber === myMemberNumber) handleSyncChar(room.Character[i]);
-        }
-      }
-      return false;
-    }
+    // Пакеты синхронизации внешности: при активной защите одежды глотаем ЦЕЛИКОМ,
+    // ничего в них не правя — игре неоткуда узнать про несанкционированную смену.
     if (name === 'ChatRoomSyncSingle' || name === 'ChatRoomSyncCharacter' || name === 'ChatRoomSyncCharacterRemove') {
       const c = extractCharacter(packet.data[1]);
-      if (c && c.MemberNumber === myMemberNumber) handleSyncChar(c);
-      return false;
-    }
-    if (name === 'ChatRoomUpdate') {
-      const c = extractCharacter(packet.data[1]);
-      if (c && c.MemberNumber === myMemberNumber && c.Appearance) handleSyncChar(c);
+      if (c && c.MemberNumber === myMemberNumber && clothingGuardActive()) {
+        console.log('[RP Mod] 🛡 Одежда: пакет синхронизации погашен (защита активна)');
+        return true;
+      }
       return false;
     }
 
@@ -433,77 +349,212 @@
     console.log('[RP Mod] Запасной фильтр ChatRoomMessage активен');
   }
 
-  function hookServerSend() {
-    const originalSend = ServerSend;
-    window.ServerSend = function(type, data) {
-      try {
-        // Собственные изменения внешности/позы — пропускаем и принимаем как новый эталон
-        if (type === 'ChatRoomCharacterUpdate' || type === 'ChatRoomPoseUpdate' ||
-            (typeof type === 'string' && (type.indexOf('Appearance') !== -1 || type.indexOf('Clothes') !== -1))) {
-          allowPending = true;
-          scheduleSnapshotUpdate();
-        }
-      } catch (e) {}
-      return originalSend.apply(this, arguments);
+  // --- Панель управления ---
+  let panelEl = null;
+  let toggleBtn = null;
+
+  function applyPanelStyle(el) {
+    el.style.position = 'fixed';
+    el.style.zIndex = '99999';
+    el.style.fontFamily = 'Arial, sans-serif';
+    el.style.fontSize = '13px';
+  }
+
+  function ensurePanel() {
+    if (toggleBtn) return;
+
+    toggleBtn = document.createElement('div');
+    toggleBtn.textContent = '🛡';
+    applyPanelStyle(toggleBtn);
+    toggleBtn.style.cssText += 'top:8px;right:8px;width:34px;height:34px;line-height:34px;text-align:center;cursor:pointer;background:rgba(30,30,40,0.85);color:#fff;border-radius:8px;user-select:none;';
+    toggleBtn.title = 'RP Mod — Щит';
+    toggleBtn.addEventListener('click', togglePanel);
+    document.body.appendChild(toggleBtn);
+
+    panelEl = document.createElement('div');
+    applyPanelStyle(panelEl);
+    panelEl.style.cssText += 'top:48px;right:8px;width:260px;background:rgba(30,30,40,0.95);color:#eee;border-radius:8px;padding:10px;display:none;box-shadow:0 4px 16px rgba(0,0,0,0.5);';
+    document.body.appendChild(panelEl);
+    renderPanel();
+  }
+
+  function togglePanel() {
+    if (!panelEl) return;
+    panelEl.style.display = panelEl.style.display === 'none' ? 'block' : 'none';
+  }
+
+  function btn(label, handler) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = 'margin:2px;padding:4px 8px;border:1px solid #666;border-radius:5px;background:#3a3a4a;color:#fff;cursor:pointer;font-size:12px;';
+    b.addEventListener('click', handler);
+    return b;
+  }
+
+  function renderPanel() {
+    if (!panelEl) return;
+    const s = getShieldState();
+    panelEl.innerHTML = '';
+
+    const title = document.createElement('div');
+    title.textContent = '🛡 RP Mod — Щит';
+    title.style.cssText = 'font-weight:bold;margin-bottom:6px;';
+    panelEl.appendChild(title);
+
+    // Режим
+    panelEl.appendChild(btn('Слежка', function() { setMode('spy'); }));
+    panelEl.appendChild(btn('Спросить', function() { setMode('alert'); }));
+    panelEl.appendChild(btn('Тихо', function() { setMode('silent'); }));
+
+    // Стражи
+    panelEl.appendChild(btn(s.clothingGuard ? 'Одежда: ВКЛ' : 'Одежда: выкл', function() {
+      const st = getShieldState();
+      st.clothingGuard = !st.clothingGuard;
+      saveShieldState(st);
+      renderPanel();
+    }));
+    panelEl.appendChild(btn(s.restrictionsGuard ? 'Ограничения: ВКЛ' : 'Ограничения: выкл', function() {
+      const st = getShieldState();
+      st.restrictionsGuard = !st.restrictionsGuard;
+      saveShieldState(st);
+      renderPanel();
+    }));
+
+    // Паник: включает оба стража разом
+    panelEl.appendChild(btn('💥 Паник-режим', function() {
+      const st = getShieldState();
+      st.clothingGuard = true;
+      st.restrictionsGuard = true;
+      saveShieldState(st);
+      console.warn('[RP Mod] 💥 Паник-режим включён: одежда и ограничения под защитой');
+      renderPanel();
+    }));
+
+    // Игнор игрока
+    panelEl.appendChild(document.createElement('br'));
+    const ignoreInput = document.createElement('input');
+    ignoreInput.placeholder = 'имя или #номер';
+    ignoreInput.style.cssText = 'width:150px;margin:4px 2px;padding:3px;border-radius:4px;border:1px solid #666;background:#222;color:#fff;';
+    ignoreInput.id = 'rpmod-ignore-input';
+    panelEl.appendChild(ignoreInput);
+    panelEl.appendChild(btn('Игнор', function() {
+      const who = resolvePlayer(document.getElementById('rpmod-ignore-input').value);
+      if (!who) { console.log('[RP Mod] Не нашёл игрока'); return; }
+      addToBlockList(who);
+      addToMuteList(who);
+      console.warn('[RP Mod] 💀 Полный игнор: ' + nameOf(who) + ' (#' + who + ')');
+      renderPanel();
+    }));
+    panelEl.appendChild(btn('Снять', function() {
+      const who = resolvePlayer(document.getElementById('rpmod-ignore-input').value);
+      if (!who) return;
+      removeFromBlockList(who);
+      removeFromMuteList(who);
+      console.log('[RP Mod] Игнор снят с ' + nameOf(who) + ' (#' + who + ')');
+      renderPanel();
+    }));
+
+    // Доверенные
+    panelEl.appendChild(document.createElement('br'));
+    const trustInput = document.createElement('input');
+    trustInput.placeholder = 'имя или #номер';
+    trustInput.style.cssText = 'width:150px;margin:4px 2px;padding:3px;border-radius:4px;border:1px solid #666;background:#222;color:#fff;';
+    trustInput.id = 'rpmod-trust-input';
+    panelEl.appendChild(trustInput);
+    panelEl.appendChild(btn('Доверять', function() {
+      const who = resolvePlayer(document.getElementById('rpmod-trust-input').value);
+      if (!who) { console.log('[RP Mod] Не нашёл игрока'); return; }
+      addToTrustList(who);
+      console.log('[RP Mod] Доверенный: ' + nameOf(who) + ' (#' + who + ')');
+      renderPanel();
+    }));
+    panelEl.appendChild(btn('Отвязать', function() {
+      const who = resolvePlayer(document.getElementById('rpmod-trust-input').value);
+      if (!who) return;
+      removeFromTrustList(who);
+      console.log('[RP Mod] Доверие снято с #' + who);
+      renderPanel();
+    }));
+
+    // Списки
+    panelEl.appendChild(document.createElement('br'));
+    const lists = document.createElement('div');
+    lists.style.cssText = 'margin-top:6px;font-size:12px;line-height:1.5;';
+    const mkList = function(label, arr, removeFn) {
+      if (!arr.length) return;
+      const row = document.createElement('div');
+      const lab = document.createElement('b');
+      lab.textContent = label + ': ';
+      row.appendChild(lab);
+      arr.forEach(function(n) {
+        const item = document.createElement('span');
+        item.textContent = nameOf(n) + ' ✖';
+        item.style.cssText = 'cursor:pointer;margin-right:8px;text-decoration:underline;';
+        item.title = 'Нажми, чтобы убрать';
+        item.addEventListener('click', function() { removeFn(n); renderPanel(); });
+        row.appendChild(item);
+      });
+      lists.appendChild(row);
     };
-    console.log('[RP Mod] Отслеживание собственных изменений активно');
+    mkList('Блок', s.blockList, removeFromBlockList);
+    mkList('Заглушенные', s.muteList, removeFromMuteList);
+    mkList('Доверенные', s.trustList, removeFromTrustList);
+    panelEl.appendChild(lists);
+  }
+
+  function setMode(mode) {
+    const s = getShieldState();
+    if (['spy', 'alert', 'silent'].indexOf(mode) === -1) return;
+    s.mode = mode;
+    saveShieldState(s);
+    console.log('[RP Mod] Режим: ' + mode);
+    renderPanel();
   }
 
   window.RPModShield = {
-    setMode: function(mode) {
-      const s = getShieldState();
-      if (['spy', 'alert', 'silent'].indexOf(mode) === -1) {
-        console.log('[RP Mod] Режимы: spy (наблюдение), alert (спрашивать), silent (тихо)');
-        return;
-      }
-      s.mode = mode;
-      saveShieldState(s);
-      console.log('[RP Mod] Режим: ' + mode);
-    },
+    setMode: setMode,
     addBlock: addToBlockList,
     unblock: removeFromBlockList,
-    list: function() { console.log('[RP Mod] Блок-лист:', getShieldState().blockList); },
+    list: function() { const s = getShieldState(); console.log('[RP Mod] Блок:', s.blockList, 'Заглушенные:', s.muteList, 'Доверенные:', s.trustList); },
     mute: function(who) {
-      let num = typeof who === 'number' ? who : (parseInt(who, 10) || numberByName(who));
+      const num = resolvePlayer(who);
       if (!num) { console.log('[RP Mod] Не нашёл игрока: ' + who); return; }
-      const s = getShieldState();
-      if (s.muteList.indexOf(num) === -1) {
-        s.muteList.push(num);
-        saveShieldState(s);
-        console.log('[RP Mod] 🔇 Заглушен: ' + nameOf(num) + ' (#' + num + ')');
-      } else {
-        console.log('[RP Mod] Игрок уже заглушен: #' + num);
-      }
+      addToMuteList(num);
+      renderPanel();
+      console.log('[RP Mod] 🔇 Заглушен: ' + nameOf(num) + ' (#' + num + ')');
     },
     unmute: function(who) {
-      let num = typeof who === 'number' ? who : (parseInt(who, 10) || numberByName(who));
+      const num = resolvePlayer(who);
       if (!num) { console.log('[RP Mod] Не нашёл игрока: ' + who); return; }
-      const s = getShieldState();
-      const i = s.muteList.indexOf(num);
-      if (i !== -1) {
-        s.muteList.splice(i, 1);
-        saveShieldState(s);
-        console.log('[RP Mod] 🔈 Размучен: #' + num);
-      } else {
-        console.log('[RP Mod] Игрока #' + num + ' нет в списке');
-      }
+      removeFromMuteList(num);
+      renderPanel();
+      console.log('[RP Mod] 🔈 Размучен: #' + num);
     },
-    mutes: function() {
-      const s = getShieldState();
-      const names = s.muteList.map(function(n) { return nameOf(n) + ' (#' + n + ')'; });
-      console.log('[RP Mod] Заглушенные: ' + (names.length ? names.join(', ') : 'пусто'));
+    mutes: function() { const s = getShieldState(); console.log('[RP Mod] Заглушенные: ' + (s.muteList.length ? s.muteList.map(function(n){return nameOf(n)+' (#'+n+')';}).join(', ') : 'пусто')); },
+    trust: function(who) {
+      const num = resolvePlayer(who);
+      if (!num) { console.log('[RP Mod] Не нашёл игрока: ' + who); return; }
+      addToTrustList(num);
+      renderPanel();
+      console.log('[RP Mod] Доверенный: ' + nameOf(num) + ' (#' + num + ')');
     },
-    snap: function() { captureSnapshot(); },
+    untrust: function(who) {
+      const num = resolvePlayer(who);
+      if (!num) return;
+      removeFromTrustList(num);
+      renderPanel();
+      console.log('[RP Mod] Доверие снято с #' + num);
+    },
     debug: function() {
       window.RPModDebug = !window.RPModDebug;
       console.log('[RP Mod] Отладка пакетов: ' + (window.RPModDebug ? 'ВКЛ' : 'выключена'));
     },
     clear: function() {
       const s = getShieldState();
-      s.blockList = [];
-      s.muteList = [];
+      s.blockList = []; s.muteList = []; s.trustList = [];
       saveShieldState(s);
-      console.log('[RP Mod] Блок-лист и заглушки очищены');
+      renderPanel();
+      console.log('[RP Mod] Все списки очищены');
     },
     off: function() { const s = getShieldState(); s.enabled = false; saveShieldState(s); console.log('[RP Mod] Щит выключен (перезагрузи страницу)'); },
     on: function() { const s = getShieldState(); s.enabled = true; saveShieldState(s); console.log('[RP Mod] Щит включён (перезагрузи страницу)'); }
@@ -522,9 +573,9 @@
       if (typeof ServerSend === 'function' && typeof ServerSocket !== 'undefined' && ServerSocket) {
         clearInterval(timer);
         hookSocket();
-        hookServerSend();
         hookChatRoomMessage();
-        console.log('[RP Mod] Щит активен. Режим: ' + getShieldState().mode);
+        ensurePanel();
+        console.log('[RP Mod] Щит активен. Режим: ' + getShieldState().mode + '. Панель: кнопка 🛡 в правом верхнем углу');
       } else if (attempts > 60) {
         clearInterval(timer);
         console.warn('[RP Mod] Функции игры не найдены за 60 секунд');
@@ -533,5 +584,5 @@
   }
 
   initShield();
-  console.log('[RP Mod] Щит запущен. Команды: setMode / addBlock / unblock / list / mute / unmute / mutes / snap / debug / clear');
+  console.log('[RP Mod] Щит запущен. Панель — кнопка 🛡. Команды: setMode / mute / unmute / trust / untrust / debug / clear');
 })();
